@@ -1,4 +1,4 @@
-{:itonami.blueprint/id "cloud-itonami-5229"
+{:itonami.blueprint/id "cloud-itonami-isic-5229"
  :itonami.blueprint/name "Community Freight Forwarding and Customs Brokerage"
  :itonami.blueprint/isic-rev5 "5229"
  :itonami.blueprint/domain :transport/freight-forwarding
@@ -8,4 +8,5 @@
  :itonami.blueprint/robotics true
  :itonami.blueprint/required-technologies [:robotics :identity :forms :dmn :bpmn :audit-ledger :logistics]
  :itonami.blueprint/optional-technologies [:optimization]
- :itonami.blueprint/status :public-oss}
+ :itonami.blueprint/status :public-oss
+ :itonami.blueprint/maturity :implemented}
