@@ -89,3 +89,69 @@
 
 (defn append [history result]
   (conj (vec history) (get result "record")))
+
+;; ─────── Inbound Cross-Actor Handoff (this actor as RECEIVER, isic-5210 -> isic-5229) ───────
+;;
+;; A `:log-shipment-record` shipment MAY OPTIONALLY carry a nested
+;; `:shipment/handoff` record: the SAME `:handoff/*` wire shape every
+;; sibling `cloud-itonami-isic-*` actor in this fleet already uses --
+;; zero shared code, zero shared dependency (this repo has no
+;; `facts.cljc`, so this predicate is pasted here verbatim, mirroring
+;; `cloud-itonami-isic-1702`'s own `corrugated.registry` placement
+;; choice). See superproject ADR-2607177600 / ADR-2800000500 /
+;; ADR-2800000700 / ADR-2800000800 / ADR-2800002100. This actor is the
+;; RECEIVING side: an upstream storage/terminal actor (e.g.
+;; `cloud-itonami-isic-5210`) MAY attach a `:handoff` when it
+;; transfers custody of stock to this freight-forwarding/customs-
+;; brokerage actor's care -- purely an OPTIONAL provenance/audit-trail
+;; attachment establishing where a shipment's goods originated, never
+;; itself a customs-clearance or shipment-release decision. Attaching
+;; a `:handoff` is entirely optional: every existing shipment record
+;; worked before this field existed and keeps working unchanged with
+;; no `:handoff` attached at all -- absence is never flagged.
+;;
+;;   {:shipment/handoff
+;;    {:handoff/id "..."
+;;     :handoff/source-actor "cloud-itonami-isic-5210"
+;;     :handoff/batch-id "..."
+;;     :handoff/product-type-id :some/keyword-or-string
+;;     :handoff/quantity-kg 120.5
+;;     :handoff/dispatched-at-iso "2026-07-24T00:00:00Z"
+;;     ;; OPTIONAL pass-through, never validated for well-formedness:
+;;     :handoff/cold-chain-temp-min-c 2.0
+;;     :handoff/cold-chain-temp-max-c 10.0
+;;     :handoff/unspsc-code "..."
+;;     :handoff/gtin "..."
+;;     :handoff/carrier-actor "cloud-itonami-isic-4920"
+;;     :handoff/carrier-tracking-ref "..."}}
+
+(defn handoff-record-well-formed?
+  "Positive-sense convenience predicate: does `handoff` carry every
+  REQUIRED `:handoff/*` field (id/source-actor/batch-id/product-type-id/
+  quantity-kg/dispatched-at-iso) with a plausible value (quantity-kg a
+  positive number, the string fields non-blank)? Never validates the
+  OPTIONAL cold-chain/unspsc/gtin/carrier pass-through fields."
+  [handoff]
+  (boolean
+   (and (map? handoff)
+        (seq (:handoff/id handoff))
+        (seq (:handoff/source-actor handoff))
+        (seq (:handoff/batch-id handoff))
+        (some? (:handoff/product-type-id handoff))
+        (number? (:handoff/quantity-kg handoff))
+        (pos? (:handoff/quantity-kg handoff))
+        (seq (:handoff/dispatched-at-iso handoff)))))
+
+(def storage-handoff-source-actors
+  "Which upstream cloud-itonami actors this freight-forwarding actor
+  recognizes as a legitimate :handoff/source-actor for a shipment's
+  documented origin (ADR-2800002100)."
+  #{"cloud-itonami-isic-5210"})
+
+(defn storage-handoff-source-actor-known?
+  "Positive-sense convenience predicate: is `source-actor` one of this
+  actor's actually-registered upstream storage/terminal suppliers
+  (`storage-handoff-source-actors`)? A nil source-actor always
+  returns false -- absence is never silently treated as known."
+  [source-actor]
+  (boolean (contains? storage-handoff-source-actors source-actor)))
