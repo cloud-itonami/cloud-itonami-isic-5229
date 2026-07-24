@@ -72,8 +72,22 @@
   confidence, or `:flag-compliance-concern` which is ALWAYS
   high-stakes) -- see `freightforwarding.phase` for the
   belt-and-suspenders second layer: `:flag-compliance-concern` is
-  never a member of any phase's `:auto` set either."
-  (:require [freightforwarding.store :as store]))
+  never a member of any phase's `:auto` set either.
+
+  ADDITIVE SOFT gate (never a hold, escalates only): a
+  `:log-shipment-record` shipment's OPTIONAL `:shipment/handoff` --
+  present only when an upstream storage/terminal actor (e.g.
+  `cloud-itonami-isic-5210`) attached custody-transfer provenance
+  data when handing off stock -- that is present but structurally
+  malformed, or that names a `:handoff/source-actor` this actor does
+  not recognize, forces `:escalate?` true (`:storage-handoff-
+  suspect`, ADR-2800002100). Absence of a `:handoff` is completely
+  normal and NEVER flagged -- see `freightforwarding.registry`'s
+  'Inbound Cross-Actor Handoff' section for the shared wire shape
+  (zero shared code/dependency with the sender) and this actor's own
+  recognized-source-actor roster."
+  (:require [freightforwarding.store :as store]
+            [freightforwarding.registry :as registry]))
 
 (def confidence-floor 0.6)
 
@@ -181,27 +195,62 @@
       [{:rule :finalize-clearance-attempt
         :detail "提案テキストが通関クリアランス/貨物リリースの確定アクションを含んでいます -- 恒久ブロック"}])))
 
+;; ────────────── Inbound Cross-Actor Handoff (Escalate, not Hold, isic-5210 -> isic-5229) ──────────────
+
+(defn- storage-handoff-suspect-escalation
+  "SOFT -- only when a `:shipment/handoff` map is actually present on
+  the target shipment's own store record. Absence is never flagged
+  (attaching a `:handoff` is entirely optional -- see
+  `freightforwarding.registry`'s 'Inbound Cross-Actor Handoff'
+  section). Escalates (never holds) when present-but-malformed or
+  from an unrecognized source-actor (ADR-2800002100)."
+  [{:keys [op target-id]} st]
+  (when (= op :log-shipment-record)
+    (let [s (store/shipment st target-id)
+          handoff (:shipment/handoff s)]
+      (when (map? handoff)
+        (when-not (and (registry/handoff-record-well-formed? handoff)
+                       (registry/storage-handoff-source-actor-known?
+                        (:handoff/source-actor handoff)))
+          [{:rule :storage-handoff-suspect
+            :detail (str target-id " のshipmentに添付された:shipment/handoff(source-actor="
+                         (pr-str (:handoff/source-actor handoff))
+                         ")が構造不整合、または登録済みsource-actorと一致しません -- "
+                         "holdではなく人間へのescalateが必要(ADR-2800002100)")}])))))
+
 ;; ----------------------------- decision logic -----------------------------
 
 (defn check
   "Censors a FreightForwardingAdvisor proposal against the governor
-  rules. Returns {:ok? bool :violations [..] :confidence c
-  :escalate? bool :high-stakes? bool :hard? bool}."
+  rules. Returns {:ok? bool :violations [..] :soft-violations [..]
+  :confidence c :escalate? bool :high-stakes? bool :hard? bool}.
+
+  `:violations` (`hard`) are the four un-overridable HOLD checks
+  above -- unchanged, still meaning exactly what they always have.
+  `:soft-violations` is an additional, independently-detected concern
+  (`:storage-handoff-suspect`) that is NOT grounds for a hold but DOES
+  force `:escalate?` true even when every hard check passes,
+  confidence is high, and the op is not otherwise high-stakes -- same
+  effect as low confidence, kept in a separate key so `:violations`
+  keeps its original meaning."
   [request _context proposal st]
   (let [hard (into []
                    (concat (shipment-unverified-violations request st)
                            (effect-not-propose-violations proposal)
                            (closed-allowlist-violations proposal)
                            (finalize-clearance-violations proposal)))
+        soft (into [] (concat (storage-handoff-suspect-escalation request st)))
         conf (:confidence proposal 0.0)
         low? (< conf confidence-floor)
         stakes? (boolean (high-stakes (:op request)))
-        hard? (boolean (seq hard))]
-    {:ok?          (and (not hard?) (not low?) (not stakes?))
+        hard? (boolean (seq hard))
+        soft? (boolean (seq soft))]
+    {:ok?          (and (not hard?) (not low?) (not stakes?) (not soft?))
      :violations   hard
+     :soft-violations soft
      :confidence   conf
      :hard?        hard?
-     :escalate?    (and (not hard?) (or low? stakes?))
+     :escalate?    (and (not hard?) (or low? stakes? soft?))
      :high-stakes? stakes?}))
 
 (defn hold-fact
