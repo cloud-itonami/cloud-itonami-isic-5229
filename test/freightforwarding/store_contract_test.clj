@@ -20,8 +20,14 @@
       (is (false? (:registered? (store/shipment s "ship-3"))) "ship-3 unregistered")
       (is (true? (:registered? (store/carrier s "car-1"))))
       (is (false? (:registered? (store/carrier s "car-2"))) "car-2 unregistered")
-      (is (= ["ship-1" "ship-2" "ship-3"] (mapv :id (store/all-shipments s))))
-      (is (= ["car-1" "car-2"] (mapv :id (store/all-carriers s))))
+      (testing "ship-4 / car-3 are registered+verified but in a jurisdiction with
+                no spec-basis -- they isolate the governor's check 5"
+        (is (true? (:verified? (store/shipment s "ship-4"))))
+        (is (= "ATL" (:jurisdiction (store/shipment s "ship-4"))))
+        (is (= "ATL" (:jurisdiction (store/carrier s "car-3")))))
+      (is (= ["ship-1" "ship-2" "ship-3" "ship-4" "ship-5"]
+             (mapv :id (store/all-shipments s))))
+      (is (= ["car-1" "car-2" "car-3"] (mapv :id (store/all-carriers s))))
       (is (= [] (store/ledger s)))
       (is (= [] (store/shipment-log s)))
       (is (= [] (store/schedule-log s)))
@@ -29,6 +35,40 @@
       (is (= [] (store/concern-log s)))
       (is (zero? (store/next-sequence s "JPN" :shipment)))
       (is (zero? (store/next-sequence s "JPN" :schedule))))))
+
+(deftest soft-gate-fields-round-trip-on-both-backends
+  (testing "both SOFT governor gates read a STRUCTURED field off the shipment
+            record. If a backend drops it, the gate silently stops firing there
+            -- which is exactly what happened to :shipment/handoff before it was
+            added to the Datomic field spec. Assert both survive the round trip."
+    (doseq [[label base] [["MemStore" (store/seed-db)]
+                          ["DatomicStore" (store/datomic-seed-db)]]]
+      (testing label
+        (testing ":compliance-checklist survives (seeded on ship-5)"
+          (is (= #{:forwarder-registration}
+                 (set (:compliance-checklist (store/shipment base "ship-5"))))))
+        (testing "absent on a record that never had one"
+          (is (nil? (:compliance-checklist (store/shipment base "ship-1")))))
+        (let [handoff {:handoff/id "h-1"
+                       :handoff/source-actor "cloud-itonami-isic-5210"
+                       :handoff/batch-id "b-1"
+                       :handoff/product-type-id "p-1"
+                       :handoff/quantity-kg 12.5
+                       :handoff/dispatched-at-iso "2026-08-06T00:00:00Z"}
+              s (store/with-shipments
+                  base
+                  {"ship-rt" {:id "ship-rt" :shipper-name "Round Trip Co"
+                              :destination "NLRTM" :jurisdiction "JPN"
+                              :registered? true :verified? true
+                              :compliance-checklist #{:forwarder-registration
+                                                      :customs-broker-licence
+                                                      :financial-security}
+                              :shipment/handoff handoff}})]
+          (testing ":shipment/handoff survives"
+            (is (= handoff (:shipment/handoff (store/shipment s "ship-rt")))))
+          (testing ":compliance-checklist survives as a set"
+            (is (= #{:forwarder-registration :customs-broker-licence :financial-security}
+                   (set (:compliance-checklist (store/shipment s "ship-rt")))))))))))
 
 (deftest write-and-ledger-parity
   (doseq [[label s] (backends)]

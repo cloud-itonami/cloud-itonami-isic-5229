@@ -85,12 +85,25 @@
     "ship-2" {:id "ship-2" :shipper-name "Borealis Imports" :destination "USLAX"
               :jurisdiction "JPN" :registered? true :verified? false}
     "ship-3" {:id "ship-3" :shipper-name "Cascade Exports" :destination "DEHAM"
-              :jurisdiction "JPN" :registered? false :verified? false}}
+              :jurisdiction "JPN" :registered? false :verified? false}
+    ;; Registered AND verified, but in a jurisdiction `freightforwarding.facts`
+    ;; has no forwarding/brokerage regime for -- isolates check 5 alone.
+    "ship-4" {:id "ship-4" :shipper-name "Atlantis Freight" :destination "XXXXX"
+              :jurisdiction "ATL" :registered? true :verified? true}
+    ;; Clean, but carries a compliance checklist that is SHORT of JPN's
+    ;; required licensing evidence -- isolates the soft escalation alone.
+    "ship-5" {:id "ship-5" :shipper-name "Partial Papers Ltd" :destination "KRPUS"
+              :jurisdiction "JPN" :registered? true :verified? true
+              :compliance-checklist #{:forwarder-registration}}}
    :carriers
    {"car-1" {:id "car-1" :name "Pacific Ocean Line" :mode "ocean"
              :jurisdiction "JPN" :registered? true}
     "car-2" {:id "car-2" :name "Unverified Air Cargo" :mode "air"
-             :jurisdiction "JPN" :registered? false}}})
+             :jurisdiction "JPN" :registered? false}
+    ;; Registered carrier, unknown jurisdiction -- check 5 applies to the
+    ;; carrier-level op too, not only to shipments.
+    "car-3" {:id "car-3" :name "Atlantis Air" :mode "air"
+             :jurisdiction "ATL" :registered? true}}})
 
 ;; ----------------------------- shared commit logic -----------------------------
 
@@ -181,12 +194,24 @@
 (defn- dec* [s] (ls/dec* s))
 
 (def ^:private shipment-spec
+  "NOTE the two `:blob?` fields. Both feed SOFT governor gates, and both
+  are structured values (a map / a set) rather than scalars, so they are
+  stored as EDN string blobs.
+
+  `:shipment/handoff` was previously ABSENT from this spec entirely,
+  which meant the `:storage-handoff-suspect` gate (ADR-2800002100) could
+  never fire on the Datomic backend -- the field was silently dropped on
+  write and read back as nil. `store_contract_test` now asserts both
+  fields round-trip on both backends, so a governor gate cannot again
+  behave differently depending on which SSoT is configured."
   {:id {:attr :shipment/id}
    :shipper-name {:attr :shipment/shipper-name}
    :destination {:attr :shipment/destination}
    :jurisdiction {:attr :shipment/jurisdiction}
    :registered? {:attr :shipment/registered? :coerce boolean}
-   :verified? {:attr :shipment/verified? :coerce boolean}})
+   :verified? {:attr :shipment/verified? :coerce boolean}
+   :compliance-checklist {:attr :shipment/compliance-checklist :blob? true}
+   :shipment/handoff {:attr :shipment/handoff :blob? true}})
 
 (def ^:private carrier-spec
   {:id {:attr :carrier/id}
