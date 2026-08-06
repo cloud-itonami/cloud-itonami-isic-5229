@@ -61,6 +61,42 @@ refuses, dispatch a consolidated shipment outside its verified
 compliance scope, or publish a reconciliation record without governor
 approval and audit evidence.
 
+## Run
+
+```bash
+clojure -M:dev:test    # 55 tests / 317 assertions
+clojure -M:dev:run     # the actor demo — walks the happy path and every refusal
+```
+
+## What the governor refuses
+
+Five HARD checks. A human approver **cannot** override any of them.
+
+| Rule | Refuses |
+|---|---|
+| `:shipment-unverified` / `:carrier-unregistered` | a target not independently `:registered?` + `:verified?` in the store |
+| `:effect-not-propose` | any proposal whose effect is not `:propose` |
+| `:op-not-allowed` | anything outside the closed four-op allowlist, including a hallucinated op |
+| `:finalize-clearance-attempt` | text that tries to finalize a clearance, waive an inspection, or authorize a release |
+| `:no-spec-basis` | a jurisdiction `freightforwarding.facts` has no registered forwarding/brokerage regime for |
+
+Two SOFT gates escalate to a human without ever holding:
+`:storage-handoff-suspect` (a present-but-malformed inbound handoff, ADR-2800002100)
+and `:licence-evidence-incomplete` (an attached compliance checklist short of its
+jurisdiction's licensing evidence). **Absence is never flagged** in either case.
+
+Every check is re-derived from the **store**, never from the proposal's
+self-report — a proposal that names a jurisdiction it is not in cannot launder
+one. See [`docs/adr/0001`](docs/adr/0001-spec-basis-and-licence-evidence.md).
+
+## Spec-basis
+
+The licensing regimes this README describes in prose above are encoded in
+`freightforwarding.facts`, with source URLs, for JPN / USA / EUR / GBR / KOR.
+Coverage is reported honestly by `facts/coverage`: **five jurisdictions is a
+starting catalog, not the world**, and a jurisdiction's absence means this actor
+has no basis for it — not that it has no regime.
+
 ## Capability layer
 
 Resolves via [`kotoba-lang/industry`](https://github.com/kotoba-lang/industry)

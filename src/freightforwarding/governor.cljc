@@ -15,7 +15,7 @@
   This is an OPERATIONS COORDINATION actor, not a customs-clearance/
   shipment-release authority -- it never itself finalizes a customs-
   clearance decision, waives a customs-inspection requirement, or
-  authorizes a shipment release. Four checks, in priority order, ALL
+  authorizes a shipment release. Five checks, in priority order, ALL
   HARD violations (a human approver CANNOT override them):
 
     1. Shipment/carrier record unverified -- the target shipment
@@ -51,6 +51,25 @@
                                        finalization ACTION into an
                                        otherwise-legitimate proposal's
                                        own text.
+    5. No spec-basis                  -- the target record's own
+                                       `:jurisdiction`, re-derived from
+                                       the STORE (never from the
+                                       proposal's self-report), must be
+                                       a jurisdiction
+                                       `freightforwarding.facts`
+                                       actually has a registered
+                                       forwarding/brokerage regime for.
+                                       Freight forwarding and customs
+                                       brokerage are LICENSED activities
+                                       almost everywhere; creating an
+                                       official coordination record
+                                       against a jurisdiction whose
+                                       regime this actor has no basis
+                                       for is exactly the kind of act
+                                       that must surface rather than
+                                       proceed. An unknown jurisdiction
+                                       has NO spec-basis -- absence of a
+                                       rule is not permission.
 
   ONE known self-tripping bug class this check is written to AVOID
   (multiple sibling `cloud-itonami-isic-*` actors in this fleet
@@ -85,9 +104,20 @@
   normal and NEVER flagged -- see `freightforwarding.registry`'s
   'Inbound Cross-Actor Handoff' section for the shared wire shape
   (zero shared code/dependency with the sender) and this actor's own
-  recognized-source-actor roster."
+  recognized-source-actor roster.
+
+  A SECOND additive SOFT gate (never a hold, escalates only): a target
+  record carrying an OPTIONAL `:compliance-checklist` that is present
+  but does NOT satisfy its own jurisdiction's licensing evidence set
+  (`freightforwarding.facts/required-evidence`) forces `:escalate?`
+  true (`:licence-evidence-incomplete`). Absence of a checklist is
+  completely normal and NEVER flagged -- most coordination records do
+  not carry one, and inventing a hold for the common case would just
+  make the actor useless. But an operator who bothered to attach one
+  and left it short is telling the actor something a human should read."
   (:require [freightforwarding.store :as store]
-            [freightforwarding.registry :as registry]))
+            [freightforwarding.registry :as registry]
+            [freightforwarding.facts :as facts]))
 
 (def confidence-floor 0.6)
 
@@ -195,6 +225,35 @@
       [{:rule :finalize-clearance-attempt
         :detail "提案テキストが通関クリアランス/貨物リリースの確定アクションを含んでいます -- 恒久ブロック"}])))
 
+(defn- target-record
+  "The store record this request targets -- a `carrier` for
+  carrier-level ops, a `shipment` otherwise. Always re-derived from the
+  STORE, never from the proposal's self-report."
+  [{:keys [op target-id]} st]
+  (if (contains? facility-level-ops op)
+    (store/carrier st target-id)
+    (store/shipment st target-id)))
+
+(defn- no-spec-basis-violations
+  "Check 5: the target's own `:jurisdiction` must be one
+  `freightforwarding.facts` has a registered forwarding/brokerage
+  regime for. An unknown (or missing, or blank) jurisdiction has NO
+  spec-basis.
+
+  Note this is deliberately NOT skipped when check 1 already fired --
+  the two answer different questions ('is this record verified here?'
+  vs 'do we know this jurisdiction's regime at all?'), and a governor
+  that reports only the first violation it finds teaches the operator
+  to fix one thing at a time."
+  [request st]
+  (let [r (target-record request st)
+        j (:jurisdiction r)]
+    (when (and r (not (facts/spec-basis-known? j)))
+      [{:rule :no-spec-basis
+        :detail (str "法域 " (pr-str j)
+                     " の貨物利用運送/通関業regimeが freightforwarding.facts に登録されていません"
+                     " -- 規制根拠を発明せず、公式調整記録を作成できません")}])))
+
 ;; ────────────── Inbound Cross-Actor Handoff (Escalate, not Hold, isic-5210 -> isic-5229) ──────────────
 
 (defn- storage-handoff-suspect-escalation
@@ -218,6 +277,23 @@
                          ")が構造不整合、または登録済みsource-actorと一致しません -- "
                          "holdではなく人間へのescalateが必要(ADR-2800002100)")}])))))
 
+(defn- licence-evidence-incomplete-escalation
+  "SOFT -- only when a `:compliance-checklist` is actually present on
+  the target's own store record. Absence is never flagged. Escalates
+  (never holds) when present but short of the jurisdiction's required
+  licensing evidence."
+  [request st]
+  (let [r (target-record request st)
+        checklist (:compliance-checklist r)]
+    (when (some? checklist)
+      (when-not (facts/required-evidence-satisfied? (:jurisdiction r) checklist)
+        [{:rule :licence-evidence-incomplete
+          :detail (str (:id r) " に添付された:compliance-checklist "
+                       (pr-str (set checklist))
+                       " が法域 " (pr-str (:jurisdiction r)) " の必要要件 "
+                       (pr-str (facts/required-evidence (:jurisdiction r)))
+                       " を満たしません -- holdではなく人間へのescalateが必要")}]))))
+
 ;; ----------------------------- decision logic -----------------------------
 
 (defn check
@@ -225,21 +301,23 @@
   rules. Returns {:ok? bool :violations [..] :soft-violations [..]
   :confidence c :escalate? bool :high-stakes? bool :hard? bool}.
 
-  `:violations` (`hard`) are the four un-overridable HOLD checks
-  above -- unchanged, still meaning exactly what they always have.
-  `:soft-violations` is an additional, independently-detected concern
-  (`:storage-handoff-suspect`) that is NOT grounds for a hold but DOES
-  force `:escalate?` true even when every hard check passes,
-  confidence is high, and the op is not otherwise high-stakes -- same
-  effect as low confidence, kept in a separate key so `:violations`
-  keeps its original meaning."
+  `:violations` (`hard`) are the five un-overridable HOLD checks
+  above -- the original four, unchanged, plus `:no-spec-basis`.
+  `:soft-violations` holds the independently-detected concerns
+  (`:storage-handoff-suspect`, `:licence-evidence-incomplete`) that are
+  NOT grounds for a hold but DO force `:escalate?` true even when every
+  hard check passes, confidence is high, and the op is not otherwise
+  high-stakes -- same effect as low confidence, kept in a separate key
+  so `:violations` keeps its original meaning."
   [request _context proposal st]
   (let [hard (into []
                    (concat (shipment-unverified-violations request st)
                            (effect-not-propose-violations proposal)
                            (closed-allowlist-violations proposal)
-                           (finalize-clearance-violations proposal)))
-        soft (into [] (concat (storage-handoff-suspect-escalation request st)))
+                           (finalize-clearance-violations proposal)
+                           (no-spec-basis-violations request st)))
+        soft (into [] (concat (storage-handoff-suspect-escalation request st)
+                              (licence-evidence-incomplete-escalation request st)))
         conf (:confidence proposal 0.0)
         low? (< conf confidence-floor)
         stakes? (boolean (high-stakes (:op request)))
