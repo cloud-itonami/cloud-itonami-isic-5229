@@ -24,7 +24,16 @@
         ;; entity-store adopter (ADR-2607141600), NOT a hand-rolled
         ;; enc/dec* copy.
         io.github.kotoba-lang/langchain-store
-        {:local/root "../../kotoba-lang/langchain-store"}}
+        {:local/root "../../kotoba-lang/langchain-store"}
+        ;; デジタル庁デザインシステム (DADS) -- the workspace-wide base
+        ;; design system (superproject CLAUDE.md, 2026-08-05). Consumed as
+        ;; a git dep (never :local/root -- that breaks for a standalone
+        ;; fork resolving out of the git cache). Used ONLY by
+        ;; `freightforwarding.render-html`, the build-time generator for
+        ;; docs/samples/operator-console.html.
+        io.github.kotoba-lang/jp-go-digital-design-system
+        {:git/url "https://github.com/kotoba-lang/jp-go-digital-design-system"
+         :git/sha "83db99546eabc53613ae826ea41d1533a3c574af"}}
  :aliases
  {;; offline workspace dev -- pin transitive langchain to local checkout
   :dev {:override-deps
@@ -32,6 +41,9 @@
          {:local/root "../../kotoba-lang/langchain"}}}
   ;; clojure -M:dev:run  -> drive the demo through one OperationActor
   :run {:main-opts ["-m" "freightforwarding.sim"]}
+  ;; clojure -M:dev:render-html -> regenerate docs/samples/operator-console.html
+  ;; by actually running the actor stack (never hand-written HTML).
+  :render-html {:main-opts ["-m" "freightforwarding.render-html"]}
   :test {:extra-paths ["test"]
          :extra-deps {io.github.cognitect-labs/test-runner
                       {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
