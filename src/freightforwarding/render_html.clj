@@ -1,0 +1,987 @@
+(ns freightforwarding.render-html
+  "Build-time HTML renderer for `docs/samples/operator-console.html`.
+
+  Closes flagship checklist item 2 for this repo, which previously had
+  NO demo page and no generator at all. This namespace drives the REAL
+  actor stack -- `freightforwarding.operation` (a compiled langgraph
+  StateGraph) -> `freightforwarding.governor` -> `freightforwarding.store`
+  -- through a scenario extended from this repo's own
+  `freightforwarding.sim` demo driver (`clojure -M:dev:run`), then
+  renders the resulting store, audit ledger and the four append-only
+  coordination-record registers.
+
+  NOTHING on the page is hand-typed. Every shipment id, shipper name,
+  destination, jurisdiction, carrier name, transport mode, record
+  number, disposition, hold rule and hold detail string is read back
+  out of the real store / ledger / graph state the run produced. The
+  action-gate table, the phase ladder, the governor rule inventory and
+  the regulatory spec-basis table are derived from the live
+  `freightforwarding.governor` / `.phase` / `.facts` / `.registry` vars
+  rather than described in prose, so they cannot drift away from the
+  code. The scenario INPUTS (which op against which shipment id, at
+  which phase, with which advisor) are of course authored -- that is
+  what a scenario is -- but no OUTPUT is.
+
+  Where the page cannot honestly show something, it says so instead of
+  inventing it. Two disclosures are DERIVED at render time, so they
+  self-correct if the code is later fixed:
+
+    - `approver-attribution` re-checks whether the human approver's id
+      actually reached the SSoT record, the audit ledger, or only the
+      graph's own `:record` channel. Measured, not assumed -- see that
+      fn's docstring for what this repo actually does.
+    - `escalation-reason-fidelity` re-checks every `:approval-requested`
+      fact whose `:reason` is `:low-confidence` against the confidence
+      the same fact carries and `governor/confidence-floor`, so a
+      mislabelled escalation reason is reported rather than repeated.
+
+  ## Why this scenario
+
+  It walks the clean coordination path on the seeded JPN shipment
+  `ship-1` (all four allowlisted ops), then exercises BOTH additive
+  SOFT gates (which escalate to a human and never hold), an approver
+  REJECTION, both rungs of the phase ladder that close a write, and
+  then ALL SIX distinct HARD governor rule keywords, none of which ever
+  reaches a human:
+
+    1. `:shipment-unverified`        -- `ship-2` (:verified? false) and
+                                        `ship-3` (:registered? false),
+                                        two different detail messages
+    2. `:carrier-unregistered`       -- `car-2` (:registered? false)
+    3. `:no-spec-basis`              -- `ship-4` and `car-3`, both in
+                                        jurisdiction ATL, which
+                                        `freightforwarding.facts` has no
+                                        forwarding/brokerage regime for.
+                                        Shown on BOTH a shipment-level
+                                        and a carrier-level op.
+    4. `:op-not-allowed`             -- a request op outside the closed
+                                        four-op allowlist. Reached
+                                        WITHOUT a rogue advisor: the
+                                        shipped mock advisor's own
+                                        `infer` fallback returns
+                                        `:operation :noop`, which the
+                                        closed allowlist rejects.
+    5. `:effect-not-propose`         -- a deliberately ROGUE advisor
+                                        injected over the SAME store,
+                                        returning `:effect :actuate`.
+                                        Unreachable from the shipped
+                                        advisor, so the only honest way
+                                        to demonstrate the governor's
+                                        defense-in-depth is through the
+                                        seam `operation/build` already
+                                        exposes.
+    6. `:finalize-clearance-attempt` -- a second ROGUE advisor that
+                                        smuggles a finalization ACTION
+                                        into an otherwise-legitimate
+                                        proposal's `:rationale`. This is
+                                        the check `sim` can only
+                                        demonstrate by calling
+                                        `governor/check` directly; here
+                                        it goes through the whole graph
+                                        and lands a real ledger fact.
+
+  Both rogue advisors are built on the SHIPPED `advisor/infer` output
+  with exactly one field replaced, so the rest of each proposal is real
+  advisor output rather than a fabricated payload.
+
+  ## Determinism
+
+  Every collaborator in the path is pure or deterministic: the mock
+  advisor is a `case` over the request, the registry's reference
+  numbers are jurisdiction-scoped zero-padded sequences, and no code in
+  `src/` reads a clock or a RNG. Every set or map iterated for the page
+  (`governor/allowed-ops`, `phase/phases`, `facts/catalog`,
+  `registry/storage-handoff-source-actors`, every `:required-evidence`
+  and `:compliance-checklist`) is explicitly sorted here rather than
+  iterated in hash order. The page contains NO timestamp and NO
+  generated id, so two consecutive runs are byte-identical (verified
+  with `cmp`).
+
+  Usage: `clojure -M:dev:render-html [out-file]`
+  (default `docs/samples/operator-console.html`)."
+  (:require [clojure.string :as str]
+            [jp-go-dds.skin]
+            [langgraph.graph :as g]
+            [freightforwarding.advisor :as advisor]
+            [freightforwarding.facts :as facts]
+            [freightforwarding.governor :as governor]
+            [freightforwarding.operation :as op]
+            [freightforwarding.phase :as phase]
+            [freightforwarding.registry :as registry]
+            [freightforwarding.store :as store]))
+
+;; ----------------------------- operator contexts -----------------------------
+
+(def ^:private operator
+  "The same operator context this repo's own `sim` driver uses."
+  {:actor-id "op-1" :actor-role :freight-forwarding-operator :phase 3})
+
+(defn- at-phase [p] (assoc operator :phase p))
+
+;; ----------------------------- driving the REAL actor -----------------------------
+
+(defn- record!
+  "Append one finished graph run to the ordered run log. `result` is the
+  raw `langgraph.graph/run*` return value -- everything rendered from it
+  is real actor output. `:verdict` is the governor's own verdict map,
+  read straight off the graph state, so the page can show SOFT
+  violations (which never reach the audit ledger) as well as HARD ones."
+  [runs tid request context advisor-label result]
+  (swap! runs conj {:tid tid
+                    :request request
+                    :context context
+                    :advisor advisor-label
+                    :audit (vec (get-in result [:state :audit]))
+                    :verdict (get-in result [:state :verdict])
+                    :record (get-in result [:state :record])
+                    :disposition (get-in result [:state :disposition])})
+  result)
+
+(defn- exec!
+  "One operation, no human in the loop (auto-commit or HOLD)."
+  ([runs actor tid request] (exec! runs actor tid request operator "mock (shipped)"))
+  ([runs actor tid request context advisor-label]
+   (record! runs tid request context advisor-label
+            (g/run* actor {:request request :context context} {:thread-id tid}))))
+
+(defn- resume!
+  "One operation the phase gate / governor escalates, then resumed by a
+  human decision (`:approved` or `:rejected`). The resumed result carries
+  the FULL accumulated audit (`:audit`'s reducer is `into`, restored from
+  the checkpointer), so only the resumed result is recorded."
+  [runs actor tid request status]
+  (g/run* actor {:request request :context operator} {:thread-id tid})
+  (record! runs tid request operator "mock (shipped)"
+           (g/run* actor {:approval {:status status :by "op-1"}}
+                   {:thread-id tid :resume? true})))
+
+(defn- rogue-advisor
+  "A deliberately MALFUNCTIONING advisor. It calls the SHIPPED
+  `advisor/infer` and replaces exactly one field, so everything else in
+  the proposal is genuine advisor output. Injected over the SAME store
+  through the seam `operation/build` already exposes."
+  [k v]
+  (reify advisor/Advisor
+    (-advise [_ st req] (assoc (advisor/infer st req) k v))))
+
+(def ^:private suspect-handoff
+  "A WELL-FORMED `:handoff/*` record (it satisfies every required field
+  `registry/handoff-record-well-formed?` asks for) whose
+  `:handoff/source-actor` is NOT on this actor's recognized roster
+  `registry/storage-handoff-source-actors`. Attached mid-scenario to
+  `ship-1` through the store's own `:shipment/upsert` effect -- the
+  effect an upstream custody-transfer writer uses, and the one this
+  actor's own `operation/op->store-effect` never emits. This is a
+  scenario INPUT and the page says so."
+  {:handoff/id "HO-2026-0724-001"
+   :handoff/source-actor "cloud-itonami-isic-9999"
+   :handoff/batch-id "BATCH-0724-A"
+   :handoff/product-type-id :dry-goods
+   :handoff/quantity-kg 120.5
+   :handoff/dispatched-at-iso "2026-07-24T00:00:00Z"})
+
+(defn run-demo!
+  "Runs a fresh seeded store through the scenario described in the ns
+  docstring. Returns `{:db :runs}` -- `:runs` is the ordered log of real
+  graph results, `:db` the real store the actor wrote."
+  []
+  (let [db     (store/seed-db)
+        actor  (op/build db)
+        ;; same store, only the advisor is swapped
+        rogue-act (op/build db {:advisor (rogue-advisor :effect :actuate)})
+        rogue-fin (op/build db {:advisor (rogue-advisor
+                                          :rationale
+                                          (str "Operator should finalize the customs clearance for this "
+                                               "consignment ahead of the vessel cut-off."))})
+        runs   (atom [])]
+
+    ;; --- clean coordination episode on ship-1 (JPN, Acme Trading Co -> NLRTM) ---
+    (exec! runs actor "t01"
+           {:op :log-shipment-record :target-id "ship-1"
+            :detail "commercial invoice + packing list received from shipper"})
+    (resume! runs actor "t02"
+             {:op :schedule-logistics-operation :target-id "ship-1"
+              :resource-request {:route "NLRTM" :consolidation "LCL"}}
+             :approved)
+    (resume! runs actor "t03"
+             {:op :flag-compliance-concern :target-id "ship-1"
+              :concern-type "document-discrepancy"
+              :description "HS code on the commercial invoice does not match the packing list"}
+             :approved)
+    (resume! runs actor "t04"
+             {:op :coordinate-carrier-booking :target-id "car-1"
+              :booking-request "40ft-container-space"}
+             :approved)
+
+    ;; --- SOFT gate 1: :licence-evidence-incomplete (escalates, never holds) ---
+    ;; ship-5 carries a :compliance-checklist that is SHORT of JPN's
+    ;; required licensing evidence. Without it this op would auto-commit
+    ;; at phase 3; the soft gate forces a human to look.
+    (resume! runs actor "t05"
+             {:op :log-shipment-record :target-id "ship-5"
+              :detail "forwarding registration on file; brokerage licence + security still outstanding"}
+             :approved)
+
+    ;; --- the human says NO ---
+    (resume! runs actor "t06"
+             {:op :flag-compliance-concern :target-id "ship-5"
+              :concern-type "licence-evidence-gap"
+              :description "customs-broker licence and financial security not evidenced for this consignment"}
+             :rejected)
+
+    ;; --- the phase ladder closes a write the governor was happy with ---
+    (exec! runs actor "t07"
+           {:op :log-shipment-record :target-id "ship-1" :detail "phase-0 read-only probe"}
+           (at-phase 0) "mock (shipped)")
+    (exec! runs actor "t08"
+           {:op :coordinate-carrier-booking :target-id "car-1" :booking-request "20ft-container-space"}
+           (at-phase 1) "mock (shipped)")
+
+    ;; --- SOFT gate 2: :storage-handoff-suspect (escalates, never holds) ---
+    ;; Attach an inbound custody-transfer record from an UNRECOGNIZED
+    ;; upstream actor, through the store's own :shipment/upsert effect.
+    (store/commit-record! db {:effect :shipment/upsert
+                              :value {:id "ship-1" :shipment/handoff suspect-handoff}})
+    (resume! runs actor "t09"
+             {:op :log-shipment-record :target-id "ship-1"
+              :detail "inbound custody transfer logged against the consignment"}
+             :approved)
+
+    ;; --- all six HARD rule keywords, none of which ever reaches a human ---
+    (exec! runs actor "t10"
+           {:op :log-shipment-record :target-id "ship-2" :detail "packing list received"})
+    (exec! runs actor "t11"
+           {:op :schedule-logistics-operation :target-id "ship-3"
+            :resource-request {:route "DEHAM"}})
+    (exec! runs actor "t12"
+           {:op :coordinate-carrier-booking :target-id "car-2"
+            :booking-request "air-cargo-space"})
+    (exec! runs actor "t13"
+           {:op :log-shipment-record :target-id "ship-4" :detail "arrival notice received"})
+    (exec! runs actor "t14"
+           {:op :coordinate-carrier-booking :target-id "car-3"
+            :booking-request "air-cargo-space"})
+    (exec! runs actor "t15"
+           {:op :finalize-customs-clearance :target-id "ship-1"})
+    (exec! runs rogue-act "t16"
+           {:op :coordinate-carrier-booking :target-id "car-1"
+            :booking-request "40ft-container-space"}
+           operator "ROGUE (:effect :actuate)")
+    (exec! runs rogue-fin "t17"
+           {:op :schedule-logistics-operation :target-id "ship-1"
+            :resource-request {:route "NLRTM"}}
+           operator "ROGUE (finalization action in :rationale)")
+
+    {:db db :runs @runs}))
+
+;; ----------------------------- rendering helpers -----------------------------
+
+(defn- esc [v]
+  (-> (str v)
+      (str/replace "&" "&amp;")
+      (str/replace "<" "&lt;")
+      (str/replace ">" "&gt;")))
+
+(defn- kw-str [v] (if (keyword? v) (name v) (str v)))
+
+(defn- code [v] (str "<code>" (esc v) "</code>"))
+
+(defn- n-cell [v] (str "<span class=\"num\">" (esc v) "</span>"))
+
+(defn- dash [] "<span class=\"muted\">&mdash;</span>")
+
+(defn- bool-cell [v]
+  (if (true? v)
+    "<span class=\"ok\">yes</span>"
+    "<span class=\"critical\">no</span>"))
+
+(defn- fact-of [audit t] (first (filter #(= t (:t %)) audit)))
+
+(defn- facts-of [audit t] (filter #(= t (:t %)) audit))
+
+(defn- row [& cells]
+  (str "        <tr>" (str/join (map #(str "<td>" % "</td>") cells)) "</tr>"))
+
+(defn- rows [xs] (str/join "\n" xs))
+
+(defn- kw-codes
+  "A deterministic, sorted `<code>` list of a keyword set."
+  [ks]
+  (if (seq ks)
+    (str/join " " (map #(code (kw-str %)) (sort-by kw-str ks)))
+    "<span class=\"muted\">none</span>"))
+
+(defn- section [title lead headers body-rows]
+  (str "  <section class=\"card\">\n"
+       "    <h2>" title "</h2>\n"
+       "    <p class=\"muted\">" lead "</p>\n"
+       "    <table>\n"
+       "      <thead><tr>" (str/join (map #(str "<th>" % "</th>") headers)) "</tr></thead>\n"
+       "      <tbody>\n" (rows body-rows) "\n      </tbody>\n"
+       "    </table>\n"
+       "  </section>\n"))
+
+;; ----------------------------- derived classification -----------------------------
+
+(defn- outcome
+  "Classify one real run from its own audit trail and the governor
+  verdict the graph left on the state. Never from a literal."
+  [{:keys [audit disposition verdict]}]
+  (let [hold (fact-of audit :governor-hold)
+        rej  (fact-of audit :approval-rejected)
+        req  (fact-of audit :approval-requested)
+        gr   (fact-of audit :approval-granted)]
+    (cond
+      rej  {:kind :approver-rejected :by (:by gr) :reason (:reason req)}
+
+      hold (if (seq (:violations hold))
+             {:kind :hard-hold :violations (:violations hold)}
+             {:kind :phase-hold
+              :phase-reason (:phase-reason hold)
+              :phase (:phase hold)})
+
+      gr   {:kind :approved :reason (:reason req) :by (:by gr)
+            :soft (:soft-violations verdict)}
+
+      req  {:kind :awaiting :reason (:reason req) :soft (:soft-violations verdict)}
+
+      (= :commit disposition) {:kind :auto-commit}
+      :else {:kind :other})))
+
+(defn- outcome-cell [o]
+  (case (:kind o)
+    :hard-hold (str "<span class=\"critical\">HARD hold &middot; "
+                    (esc (str/join ", " (map (comp kw-str :rule) (:violations o))))
+                    "</span>")
+    :phase-hold (str "<span class=\"critical\">phase hold &middot; "
+                     (esc (kw-str (:phase-reason o)))
+                     "</span>")
+    :approver-rejected "<span class=\"critical\">escalated &rarr; human REJECTED</span>"
+    :approved (str "<span class=\"ok\">escalated (" (esc (kw-str (:reason o)))
+                   ") &rarr; approved by " (esc (:by o)) "</span>")
+    :awaiting (str "<span class=\"warn\">awaiting human approval &middot; "
+                   (esc (kw-str (:reason o))) "</span>")
+    :auto-commit "<span class=\"ok\">auto-commit (governor-clean)</span>"
+    "<span class=\"muted\">in progress</span>"))
+
+(defn- detail-cell [o]
+  (case (:kind o)
+    :hard-hold (esc (str/join " / " (map :detail (:violations o))))
+    :phase-hold (str "<span class=\"muted\">governor was clean; phase "
+                     (esc (:phase o))
+                     " does not enable this write</span>")
+    :approver-rejected "<span class=\"muted\">rule <code>:approver-rejected</code> &mdash; no SSoT mutation</span>"
+    (if (seq (:soft o))
+      (str "<span class=\"warn\">SOFT: "
+           (esc (str/join " / " (map (comp kw-str :rule) (:soft o))))
+           "</span>")
+      (dash))))
+
+(defn- deep-key-names
+  "Every key name appearing anywhere in a nested structure, as strings.
+  Used to ask the SSoT what it actually holds instead of assuming."
+  [x]
+  (cond
+    (map? x) (into (into #{} (map kw-str) (keys x))
+                   (mapcat deep-key-names (vals x)))
+    (sequential? x) (into #{} (mapcat deep-key-names x))
+    (set? x) (into #{} (mapcat deep-key-names x))
+    :else #{}))
+
+(def ^:private approver-key-names
+  #{"approved-by" "approved_by" "approver" "approved-by-id" "approved_by_id" "by"})
+
+(defn- approver?
+  [k] (contains? approver-key-names (str/lower-case k)))
+
+(defn- approver-attribution
+  "DERIVED honest disclosure about where the human approver's id
+  actually lives after a `:request-approval` handoff. MEASURED against
+  the real store at render time, not asserted, so it self-corrects if
+  the store is later fixed.
+
+  What this repo actually does, as observed by running it:
+  `operation`'s `:request-approval` node attaches the approver at
+  `:approved-by` ON THE `:record` MAP (not under `:value`), and that map
+  really does reach the graph's `:record` channel carrying it. But
+  `store/commit-record!` destructures `{:keys [effect path value]}` and
+  its four log/propose/coordinate/concern branches build the persisted
+  record purely from `path` + the store's own sequence counter via
+  `freightforwarding.registry` -- `:approved-by` is never read back out.
+  The `:commit` node likewise appends only its `:committed` fact to the
+  ledger, never the `:approval-granted` fact that carries `:by`.
+
+  So the approver reaches the graph's `:record` channel, and NEITHER the
+  SSoT record NOR the audit ledger. Returns
+  `{:approvers :on-record? :on-ledger? :on-graph-record?}`."
+  [db runs]
+  (let [persisted (concat (store/shipment-log db) (store/schedule-log db)
+                          (store/carrier-log db) (store/concern-log db)
+                          (store/all-shipments db) (store/all-carriers db))
+        names     (deep-key-names persisted)]
+    {:approvers (vec (sort (into #{} (keep #(:by (fact-of (:audit %) :approval-granted))) runs)))
+     :on-record? (boolean (some approver? names))
+     :on-ledger? (boolean (some #(some? (:by %)) (store/ledger db)))
+     :on-graph-record? (boolean (some #(some? (:approved-by (:record %))) runs))}))
+
+(defn- escalation-reason-fidelity
+  "DERIVED. `operation`'s `:decide` node labels every escalation the
+  phase gate did not itself name as `:low-confidence`, even when the
+  governor's confidence was comfortably above `governor/confidence-floor`
+  and the real cause was an additive SOFT gate. Rather than repeat the
+  label, this re-checks each `:approval-requested` fact against the
+  confidence the SAME fact carries, and reports the mismatches with the
+  soft rules the verdict actually held."
+  [runs]
+  (vec (for [{:keys [tid audit verdict]} runs
+             f (facts-of audit :approval-requested)
+             :when (and (= :low-confidence (:reason f))
+                        (number? (:confidence f))
+                        (>= (:confidence f) governor/confidence-floor))]
+         {:tid tid
+          :op (:op f)
+          :target-id (:target-id f)
+          :reason (:reason f)
+          :confidence (:confidence f)
+          :actual-rules (mapv :rule (:soft-violations verdict))})))
+
+(defn- rule-inventory
+  "DERIVED inventory of every governor rule keyword this run actually
+  exercised, split by whether it landed in `:violations` (HARD, holds)
+  or `:soft-violations` (SOFT, escalates). Nothing is enumerated from a
+  literal list, so a rule added to the governor but never exercised is
+  visibly absent rather than silently claimed."
+  [runs]
+  (let [hard (frequencies (for [r runs, v (:violations (:verdict r))] (:rule v)))
+        soft (frequencies (for [r runs, v (:soft-violations (:verdict r))] (:rule v)))
+        rejected (frequencies (for [r runs
+                                    f (facts-of (:audit r) :approval-rejected)
+                                    v (:violations f)]
+                                (:rule v)))]
+    {:hard hard :soft soft :rejected rejected}))
+
+(defn- holds
+  "The `:governor-hold` facts the run actually wrote to the ledger."
+  [db]
+  (filterv #(= :governor-hold (:t %)) (store/ledger db)))
+
+(defn- hard-holds
+  "Ledger holds that carry at least one governor rule violation -- i.e.
+  the governor itself refused, not the phase gate."
+  [db]
+  (filterv #(seq (:violations %)) (holds db)))
+
+;; ----------------------------- sections (all derived) -----------------------------
+
+(defn- shipment-rows [db]
+  (for [{:keys [id shipper-name destination jurisdiction registered? verified?
+                compliance-checklist]
+         :as s} (store/all-shipments db)]
+    (row (code id)
+         (esc shipper-name)
+         (code destination)
+         (esc jurisdiction)
+         (bool-cell registered?)
+         (bool-cell verified?)
+         (if (facts/spec-basis-known? jurisdiction)
+           "<span class=\"ok\">on file</span>"
+           "<span class=\"critical\">none</span>")
+         (if (some? compliance-checklist)
+           (kw-codes compliance-checklist)
+           (dash))
+         (if (map? (:shipment/handoff s))
+           (code (:handoff/source-actor (:shipment/handoff s)))
+           (dash)))))
+
+(defn- carrier-rows [db]
+  (for [{:keys [id name mode jurisdiction registered?]} (store/all-carriers db)]
+    (row (code id)
+         (esc name)
+         (code mode)
+         (esc jurisdiction)
+         (bool-cell registered?)
+         (if (facts/spec-basis-known? jurisdiction)
+           "<span class=\"ok\">on file</span>"
+           "<span class=\"critical\">none</span>"))))
+
+(defn- run-rows [db runs]
+  (for [{:keys [tid request context advisor] :as r} runs
+        :let [o (outcome r)
+              s (store/shipment db (:target-id request))
+              c (store/carrier db (:target-id request))]]
+    (row (code tid)
+         (code (kw-str (:op request)))
+         (code (:target-id request))
+         (esc (or (:jurisdiction s) (:jurisdiction c) "n/a"))
+         (n-cell (:phase context))
+         (if (str/starts-with? advisor "ROGUE")
+           (str "<span class=\"critical\">" (esc advisor) "</span>")
+           (str "<span class=\"muted\">" (esc advisor) "</span>"))
+         (outcome-cell o)
+         (detail-cell o))))
+
+(defn- hold-rows
+  "One row per HARD ledger hold. The rule and the detail text are the
+  governor's own, verbatim."
+  [db]
+  (for [{:keys [op target-id violations confidence]} (hard-holds db)
+        v violations]
+    (row (code (kw-str op))
+         (code target-id)
+         (str "<span class=\"critical\">" (esc (kw-str (:rule v))) "</span>")
+         (esc (:detail v))
+         (n-cell confidence))))
+
+(defn- gate-rows
+  "The action gate, DERIVED from the live governor/phase vars -- not a
+  prose description that could drift away from the code."
+  []
+  (let [auto3 (get-in phase/phases [3 :auto])]
+    (for [o (sort-by kw-str governor/allowed-ops)
+          :let [first-write-phase (first (for [p (sort (keys phase/phases))
+                                               :when (contains? (:writes (get phase/phases p)) o)]
+                                           p))]]
+      (row (code (kw-str o))
+           (if (contains? governor/facility-level-ops o)
+             (str (code "carrier") " &middot; re-verifies <code>:registered?</code>")
+             (str (code "shipment") " &middot; re-verifies <code>:registered?</code> + <code>:verified?</code>"))
+           (if first-write-phase (n-cell first-write-phase) "<span class=\"muted\">never</span>")
+           (if (contains? auto3 o)
+             "<span class=\"ok\">may auto-commit when governor-clean</span>"
+             "<span class=\"warn\">human approval, every phase</span>")
+           (if (contains? governor/high-stakes o)
+             "<span class=\"warn\">always high-stakes</span>"
+             "<span class=\"muted\">no</span>")))))
+
+(defn- phase-rows []
+  (for [p (sort (keys phase/phases))
+        :let [{:keys [label writes auto]} (get phase/phases p)]]
+    (row (n-cell p) (esc label) (kw-codes writes) (kw-codes auto))))
+
+(defn- rule-rows [{:keys [hard soft rejected]}]
+  (concat
+   (for [[rule n] (sort-by (comp kw-str key) hard)]
+     (row (code (kw-str rule))
+          "<span class=\"critical\">HARD</span>"
+          "<span class=\"critical\">hold &mdash; a human approver CANNOT override</span>"
+          (n-cell n)))
+   (for [[rule n] (sort-by (comp kw-str key) soft)]
+     (row (code (kw-str rule))
+          "<span class=\"warn\">SOFT</span>"
+          "<span class=\"warn\">escalate &mdash; forces a human to look, never holds</span>"
+          (n-cell n)))
+   (for [[rule n] (sort-by (comp kw-str key) rejected)]
+     (row (code (kw-str rule))
+          "<span class=\"critical\">HUMAN</span>"
+          "<span class=\"critical\">hold &mdash; the approver refused at <code>:request-approval</code></span>"
+          (n-cell n)))))
+
+(defn- spec-basis-rows
+  "The regulatory catalog, read straight out of
+  `freightforwarding.facts/catalog`. Freight forwarding and customs
+  brokerage are separately licensed almost everywhere, so each entry
+  carries BOTH regimes."
+  []
+  (for [iso3 (sort (keys facts/catalog))
+        :let [{:keys [owner-authority legal-basis forwarder-regime broker-regime
+                      required-evidence sources]}
+              (facts/jurisdiction iso3)]]
+    (row (code iso3)
+         (esc owner-authority)
+         (esc legal-basis)
+         (esc forwarder-regime)
+         (esc broker-regime)
+         (kw-codes required-evidence)
+         (str/join "<br>" (for [u sources]
+                            (str "<a href=\"" (esc u) "\">" (esc u) "</a>"))))))
+
+(defn- provenance-rows []
+  (for [iso3 (sort (keys facts/catalog))]
+    (row (code iso3) (esc (:provenance (facts/jurisdiction iso3))))))
+
+(defn- ledger-rows [db]
+  (for [{:keys [t op target-id disposition basis violations summary confidence phase-reason]}
+        (store/ledger db)]
+    (row (case t
+           :committed "<span class=\"ok\">committed</span>"
+           :governor-hold "<span class=\"critical\">governor-hold</span>"
+           :approval-rejected "<span class=\"critical\">approval-rejected</span>"
+           (esc (kw-str t)))
+         (code (kw-str op))
+         (code target-id)
+         (esc (kw-str disposition))
+         (cond
+           (seq violations) (esc (str/join ", " (map (comp kw-str :rule) violations)))
+           phase-reason (str (code (kw-str phase-reason))
+                             " <span class=\"muted\">(phase gate, governor clean)</span>")
+           (seq basis) (esc (str/join " ; " (map kw-str basis)))
+           :else (dash))
+         (if summary (esc summary) (dash))
+         (if (some? confidence) (n-cell confidence) (dash)))))
+
+(defn- artifact-rows [history]
+  (for [r history]
+    (row (code (get r "record_id"))
+         (esc (get r "kind"))
+         (code (get r "target_id"))
+         (esc (get r "jurisdiction"))
+         (bool-cell (get r "immutable")))))
+
+(defn- handoff-rows
+  "The inbound custody-transfer record actually attached to a shipment in
+  the SSoT, field by field, read back out of the store."
+  [db]
+  (for [s (store/all-shipments db)
+        :let [h (:shipment/handoff s)]
+        :when (map? h)
+        k (sort-by kw-str (keys h))]
+    (row (code (:id s))
+         (code (str k))
+         (esc (pr-str (get h k)))
+         (if (= :handoff/source-actor k)
+           (if (registry/storage-handoff-source-actor-known? (get h k))
+             "<span class=\"ok\">on the recognized roster</span>"
+             "<span class=\"critical\">NOT on the recognized roster</span>")
+           (dash)))))
+
+;; ----------------------------- prose sections -----------------------------
+
+(defn- attribution-section
+  "Renders the approver-attribution disclosure from the DERIVED
+  measurement, so the claim tracks the code. The demo never prints an
+  approver as though the store held one."
+  [{:keys [approvers on-record? on-ledger? on-graph-record?]}]
+  (str "  <section class=\"card\">\n"
+       "    <h2>Approver attribution &mdash; what the SSoT does and does not hold</h2>\n"
+       "    <p class=\"muted\">Measured against the real store at render time: every persisted record "
+       "in all four registers plus both entity directories is scanned for an approver key, the ledger "
+       "for any fact carrying <code>:by</code>, and every run's own <code>:record</code> graph channel "
+       "for <code>:approved-by</code>. This disclosure cannot drift away from the code.</p>\n"
+       "    <table>\n"
+       "      <thead><tr><th>Question</th><th>Answer</th></tr></thead>\n"
+       "      <tbody>\n"
+       (rows [(row "approver id(s) on this run&rsquo;s <code>:approval-granted</code> audit facts"
+                   (if (seq approvers) (str/join " " (map code approvers)) (dash)))
+              (row "carried on the graph&rsquo;s own <code>:record</code> channel (<code>:approved-by</code>)"
+                   (if on-graph-record?
+                     "<span class=\"ok\">yes</span>"
+                     "<span class=\"critical\">no</span>"))
+              (row "carried on any persisted record in the SSoT"
+                   (if on-record?
+                     "<span class=\"ok\">yes</span>"
+                     "<span class=\"critical\">no</span>"))
+              (row "carried on any fact in the store&rsquo;s audit ledger"
+                   (if on-ledger?
+                     "<span class=\"ok\">yes</span>"
+                     "<span class=\"critical\">no</span>"))])
+       "\n      </tbody>\n    </table>\n"
+       "    <p>"
+       (cond
+         (empty? approvers)
+         "This run produced no human approval, so there is no approver to attribute."
+
+         (and on-record? on-ledger?)
+         "The approver is persisted on the committed record <em>and</em> on the audit ledger."
+
+         on-record?
+         (str "The approver is persisted on the committed record, but not as a ledger fact "
+              "&mdash; the &ldquo;approved by&rdquo; text above is joined from each run&rsquo;s "
+              "own <code>:approval-granted</code> audit fact.")
+
+         :else
+         (str "<strong>The approver is not retained anywhere the SSoT can be queried for it.</strong> "
+              "<code>operation</code>&rsquo;s <code>:request-approval</code> node really does attach it "
+              "&mdash; the measurement above confirms <code>:approved-by</code> reaches the graph&rsquo;s "
+              "<code>:record</code> channel &mdash; but <code>store/commit-record!</code> destructures "
+              "<code>{:keys [effect path value]}</code> and its four log / propose / coordinate / concern "
+              "branches build the persisted record purely from <code>path</code> plus the store&rsquo;s "
+              "own sequence counter via <code>freightforwarding.registry</code>; <code>:approved-by</code> "
+              "is never read back out. The <code>:commit</code> node likewise appends only its "
+              "<code>:committed</code> fact to the ledger, never the <code>:approval-granted</code> fact "
+              "that carries <code>:by</code>. So every &ldquo;approved by&rdquo; on this page is "
+              "<strong>audit-trail only &mdash; not retained in the record</strong>, joined back from the "
+              "run&rsquo;s in-memory audit channel. This page states the gap plainly rather than printing "
+              "an approver as though the store held one: a reader can tell &ldquo;nobody approved&rdquo; "
+              "from &ldquo;the store did not keep it&rdquo;."))
+       "</p>\n"
+       "  </section>\n"))
+
+(defn- fidelity-section
+  "Renders the escalation-reason fidelity check. Empty is the good case
+  and says so, rather than silently omitting the section."
+  [mismatches]
+  (str "  <section class=\"card\">\n"
+       "    <h2>Escalation-reason fidelity &mdash; is the stated reason the real one?</h2>\n"
+       "    <p class=\"muted\">Every <code>:approval-requested</code> fact whose <code>:reason</code> is "
+       "<code>:low-confidence</code> is re-checked at render time against the confidence the SAME fact "
+       "carries and <code>governor/confidence-floor</code> (" (esc governor/confidence-floor)
+       "). A row here means the actor asked a human to look for a reason it then mislabelled.</p>\n"
+       (if (empty? mismatches)
+         (str "    <p><span class=\"ok\">No mismatch in this run.</span> Every escalation reason on the "
+              "audit trail is consistent with the confidence recorded alongside it.</p>\n")
+         (str "    <table>\n"
+              "      <thead><tr><th>Thread</th><th>Op</th><th>Subject</th><th>Stated reason</th>"
+              "<th>Recorded confidence</th><th>Rule that actually forced the escalation</th></tr></thead>\n"
+              "      <tbody>\n"
+              (rows (for [{:keys [tid op target-id reason confidence actual-rules]} mismatches]
+                      (row (code tid) (code (kw-str op)) (code target-id)
+                           (str "<span class=\"critical\">" (code (kw-str reason)) "</span>")
+                           (n-cell confidence)
+                           (if (seq actual-rules)
+                             (str "<span class=\"warn\">"
+                                  (str/join " " (map #(code (kw-str %)) actual-rules))
+                                  "</span>")
+                             (dash)))))
+              "\n      </tbody>\n    </table>\n"
+              "    <p>The escalation itself is correct &mdash; a human was asked, and the additive SOFT "
+              "gate that forced it is real. Only the <em>label</em> is wrong: <code>operation</code>&rsquo;s "
+              "<code>:decide</code> node falls back to <code>:low-confidence</code> for any escalation the "
+              "phase gate did not itself name, so a soft-gate escalation is recorded under the wrong reason. "
+              "Nothing was auto-committed that should not have been; the audit trail is simply less "
+              "informative than the verdict that produced it. This page shows the verdict&rsquo;s own "
+              "<code>:soft-violations</code> instead of repeating the label.</p>\n"))
+       "  </section>\n"))
+
+;; ----------------------------- the document -----------------------------
+
+(defn render
+  "Renders the whole operator console from a `run-demo!` result. Takes no
+  clock and no seed: identical input -> identical bytes."
+  [{:keys [db runs]}]
+  (let [ledger    (vec (store/ledger db))
+        outcomes  (mapv outcome runs)
+        hs        (holds db)
+        hard      (hard-holds db)
+        phase-h   (filterv #(empty? (:violations %)) hs)
+        committed (filterv #(= :committed (:t %)) ledger)
+        rejected  (filterv #(= :approval-rejected (:t %)) ledger)
+        approved  (filterv #(= :approved (:kind %)) outcomes)
+        auto      (filterv #(= :auto-commit (:kind %)) outcomes)
+        soft-runs (filterv #(seq (:soft-violations (:verdict %))) runs)
+        inv       (rule-inventory runs)
+        att       (approver-attribution db runs)
+        fid       (escalation-reason-fidelity runs)
+        cov       (facts/coverage)]
+    (str
+     "<!DOCTYPE html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">"
+     "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1, viewport-fit=cover\">"
+     "<meta name=\"color-scheme\" content=\"light\">"
+     "<title>cloud-itonami-isic-5229 &middot; other transportation support activities "
+     "(freight forwarding &amp; customs brokerage) &mdash; operator console</title>"
+     "<style>" (jp-go-dds.skin/dds+skin) "</style></head><body>\n"
+
+     "<header class=\"bar\">\n"
+     "  <h1>Freight forwarding &amp; customs brokerage (ISIC 5229) &mdash; Operator Console</h1>\n"
+     "</header>\n"
+     "<p><span class=\"badge\">read-only sample</span> "
+     "<span class=\"badge\">governor-gated</span> "
+     "<span class=\"badge\">coordination-only &middot; every effect is :propose</span> "
+     "<span class=\"badge\">never a customs-clearance or shipment-release authority</span></p>\n"
+     "<p class=\"subtitle\">Generated at build time by <code>freightforwarding.render-html</code> "
+     "(<code>clojure -M:dev:render-html</code>) by actually running the compiled "
+     "<code>freightforwarding.operation</code> StateGraph over a freshly seeded store. "
+     "Every value below was read back out of that run &mdash; there is no mock markup on this page, "
+     "and no timestamp, so successive regenerations are byte-identical.</p>\n"
+
+     "<main>\n"
+
+     (section "Run summary"
+              "Counted from the real audit ledger, the real graph results and the governor's own
+               verdict maps &mdash; not asserted."
+              ["Measure" "Count"]
+              [(row "shipments in the SSoT" (n-cell (count (store/all-shipments db))))
+               (row "carriers in the SSoT" (n-cell (count (store/all-carriers db))))
+               (row "graph runs in this scenario" (n-cell (count runs)))
+               (row "<span class=\"ok\">auto-commits (governor-clean, phase 3)</span>" (n-cell (count auto)))
+               (row "<span class=\"ok\">escalated &rarr; human-approved commits</span>" (n-cell (count approved)))
+               (row "<span class=\"critical\">escalated &rarr; human REJECTED</span>" (n-cell (count rejected)))
+               (row "<span class=\"warn\">runs an additive SOFT gate escalated</span>" (n-cell (count soft-runs)))
+               (row "<span class=\"critical\">HARD governor holds (never reach a human)</span>" (n-cell (count hard)))
+               (row "<span class=\"critical\">phase-gate holds (governor clean, phase closed the write)</span>"
+                    (n-cell (count phase-h)))
+               (row "distinct HARD rule keywords exercised" (n-cell (count (:hard inv))))
+               (row "distinct SOFT rule keywords exercised" (n-cell (count (:soft inv))))
+               (row "committed facts in the audit ledger" (n-cell (count committed)))
+               (row "audit-ledger facts total" (n-cell (count ledger)))
+               (row "confidence floor (<code>governor/confidence-floor</code>)"
+                    (n-cell governor/confidence-floor))
+               (row "jurisdictions with an official spec-basis on file" (n-cell (:count cov)))
+               (row "&hellip; which jurisdictions" (kw-codes (:jurisdictions cov)))])
+
+     (section "Shipment directory (SSoT)"
+              "The shipment/consignment register after the run. <code>:registered?</code> and
+               <code>:verified?</code> are the ground truth the Freight Forwarding Governor
+               re-derives from the STORE on every request &mdash; never from the advisor's own
+               self-report or its confidence. &ldquo;Spec-basis&rdquo; is looked up live in
+               <code>freightforwarding.facts</code>: a jurisdiction absent from that catalog has
+               NO basis, and absence of a rule is not permission."
+              ["Id" "Shipper" "Destination" "Jurisdiction" "Registered?" "Verified?"
+               "Spec-basis" "Compliance checklist" "Inbound handoff from"]
+              (shipment-rows db))
+
+     (section "Carrier directory (SSoT)"
+              "<code>:coordinate-carrier-booking</code> is a facility-level op: its target is a
+               CARRIER account-relationship record, not a per-shipment record, so the governor
+               independently re-verifies the carrier is <code>:registered?</code> instead of
+               demanding a per-shipment clearance."
+              ["Id" "Carrier" "Mode" "Jurisdiction" "Registered?" "Spec-basis"]
+              (carrier-rows db))
+
+     (section "Operation dispositions (this run)"
+              "One row per graph run, in execution order. The outcome is classified from each run's
+               own audit trail and the governor verdict the graph left on its state; the detail text
+               is the governor's own message, verbatim. Where a row reads &ldquo;approved by&rdquo;,
+               that approver comes from the run's <code>:approval-granted</code> audit fact and NOT
+               from the stored record &mdash; see the approver-attribution section below."
+              ["Thread" "Op" "Subject" "Jurisdiction" "Phase" "Advisor" "Outcome" "Governor detail"]
+              (run-rows db runs))
+
+     (section "HARD governor holds &mdash; rule by rule"
+              "One row per violation on a hold the governor itself refused (the phase-gate holds are
+               excluded here; they carry no governor rule). All of these are un-overridable: a human
+               approver never sees them, because the graph routes straight from
+               <code>:decide</code> to <code>:hold</code> without passing
+               <code>:request-approval</code>."
+              ["Op" "Subject" "Rule" "Governor detail (verbatim)" "Advisor confidence"]
+              (hold-rows db))
+
+     (attribution-section att)
+
+     (fidelity-section fid)
+
+     (section "Governor rule inventory (as exercised by this run)"
+              "Derived by counting the rule keywords that actually appeared in this run's verdict maps
+               &mdash; <code>:violations</code> (HARD) versus <code>:soft-violations</code> (SOFT)
+               &mdash; plus the rule the human rejection wrote. Nothing here is enumerated from a
+               literal list, so a rule that exists in the governor but was never exercised is
+               visibly absent rather than silently claimed."
+              ["Rule" "Class" "Effect" "Times exercised"]
+              (rule-rows inv))
+
+     (section "Action gate (Freight Forwarding Governor)"
+              "Derived from <code>governor/allowed-ops</code>, <code>governor/high-stakes</code>,
+               <code>governor/facility-level-ops</code> and <code>phase/phases</code> &mdash; if the
+               code changes, this table changes. The allowlist is CLOSED: no op that would finalize a
+               customs clearance or authorize a shipment release exists in it at all, so that
+               territory is structurally unreachable rather than merely forbidden."
+              ["Op" "Verification target" "Writable from phase" "At phase 3" "Permanent escalation"]
+              (gate-rows))
+
+     (section "Rollout phase ladder"
+              "Read straight out of <code>freightforwarding.phase/phases</code>.
+               <code>:flag-compliance-concern</code> is deliberately absent from EVERY phase's
+               <code>:auto</code> set, including phase 3 &mdash; a permanent structural fact, not a
+               rollout milestone still to come. The governor's <code>high-stakes</code> set enforces
+               the same invariant independently: two layers agree, on purpose."
+              ["Phase" "Label" "Writes allowed" "May auto-commit"]
+              (phase-rows))
+
+     (section "Licensing spec-basis catalog"
+              "Read straight out of <code>freightforwarding.facts/catalog</code>. Freight forwarding
+               and customs brokerage are SEPARATELY licensed in every regime below, so each entry
+               carries both. A jurisdiction absent from this table has NO spec-basis, and the
+               governor holds any coordination proposal against it
+               (<code>:no-spec-basis</code>)."
+              ["Jurisdiction" "Owner authority" "Legal basis" "Forwarder regime" "Broker regime"
+               "Required evidence" "Official sources"]
+              (spec-basis-rows))
+
+     (section "Spec-basis provenance (honest scope of the citations)"
+              "Each catalog entry's own <code>:provenance</code> string, verbatim. These record URL
+               reachability &mdash; not an extraction of any instrument's full text, and not a claim
+               about any specific article or section number."
+              ["Jurisdiction" "Provenance (verbatim)"]
+              (provenance-rows))
+
+     (section "Audit ledger"
+              "Append-only decision facts the run actually wrote to the store, in write order. Note
+               that a phase-gate hold carries an empty <code>:basis</code> and a
+               <code>:phase-reason</code> instead &mdash; the governor had nothing against it."
+              ["Fact" "Op" "Subject" "Disposition" "Basis / violated rule" "Summary" "Confidence"]
+              (ledger-rows db))
+
+     (section "Shipment-log records"
+              "Jurisdiction-scoped, zero-padded sequence numbers built by
+               <code>freightforwarding.registry</code>. Every record is an UNSIGNED
+               <code>*-draft</code> &mdash; administrative record-keeping, never a customs-clearance
+               decision."
+              ["Record id" "Kind" "Subject" "Jurisdiction" "Immutable"]
+              (artifact-rows (store/shipment-log db)))
+
+     (section "Routing / consolidation scheduling proposals"
+              "A proposed routing and consolidation WINDOW &mdash; never a shipment-release
+               authorization. Always human-approved before commit, at every phase including 3."
+              ["Record id" "Kind" "Subject" "Jurisdiction" "Immutable"]
+              (artifact-rows (store/schedule-log db)))
+
+     (section "Carrier-booking coordination records"
+              "Coordination only &mdash; never a carrier-contract commitment and never a
+               shipment-release authorization. Also always human-approved before commit."
+              ["Record id" "Kind" "Subject" "Jurisdiction" "Immutable"]
+              (artifact-rows (store/carrier-log db)))
+
+     (section "Customs-documentation / compliance-concern flags"
+              "Written only after mandatory human sign-off. This register holds the flag itself,
+               never a customs-clearance or shipment-release status change. The rejected concern on
+               <code>ship-5</code> is correctly ABSENT here &mdash; the human said no, and no SSoT
+               mutation followed."
+              ["Record id" "Kind" "Subject" "Jurisdiction" "Immutable"]
+              (artifact-rows (store/concern-log db)))
+
+     (section "Inbound cross-actor custody handoff"
+              (str "An optional <code>:shipment/handoff</code> attachment, read back field by field
+               out of the SSoT. Attaching one is entirely optional and its absence is NEVER flagged;
+               this scenario attaches one through the store's own <code>:shipment/upsert</code>
+               effect &mdash; the effect an upstream custody-transfer writer uses, and the one this
+               actor's own <code>operation/op-&gt;store-effect</code> never emits. It is WELL-FORMED
+               by <code>registry/handoff-record-well-formed?</code> but names a source actor outside
+               this actor's recognized roster "
+                   (kw-codes registry/storage-handoff-source-actors)
+                   ", which is exactly what the additive SOFT gate
+               <code>:storage-handoff-suspect</code> is for: escalate to a human, never hold.")
+              ["Shipment" "Field" "Value" "Roster check"]
+              (handoff-rows db))
+
+     "</main>\n"
+     "<footer>\n"
+     "  <p>This actor NEVER finalizes a customs-clearance decision, NEVER waives a customs-inspection\n"
+     "  requirement and NEVER authorizes a shipment release &mdash; that authority belongs to the\n"
+     "  customs administration and the licensed broker of record, and no such op exists anywhere in\n"
+     "  this actor's closed allowlist to begin with. Every proposal carries <code>:effect :propose</code>;\n"
+     "  committing one means a coordination artifact was logged, never that goods were cleared or\n"
+     "  released.</p>\n"
+     "  <p>Regenerate: <code>clojure -M:dev:render-html</code></p>\n"
+     "</footer>\n"
+     "</body></html>\n")))
+
+;; ----------------------------- entry point -----------------------------
+
+(defn -main [& args]
+  (let [out (or (first args) "docs/samples/operator-console.html")
+        {:keys [db runs] :as result} (run-demo!)
+        hard (hard-holds db)
+        commits (filterv #(= :committed (:t %)) (store/ledger db))]
+    ;; A console that shows no real HARD hold is not evidence of a governor.
+    (when (empty? hard)
+      (throw (ex-info (str "no HARD :governor-hold fact on the ledger — refusing to write a console "
+                           "that shows no real hold")
+                      {:ledger-facts (count (store/ledger db))
+                       :holds (count (holds db))})))
+    ;; ...and one that shows no commit at all is not evidence of an actor.
+    (when (empty? commits)
+      (throw (ex-info (str "no :committed fact on the ledger — refusing to write a console that "
+                           "shows no clean path")
+                      {:ledger-facts (count (store/ledger db))})))
+    (let [f (java.io.File. ^String out)]
+      (when-let [p (.getParentFile f)] (.mkdirs p))
+      (spit f (render result)))
+    (println "wrote" out
+             (str "(" (count (store/ledger db)) " ledger facts, "
+                  (count hard) " HARD governor holds, "
+                  (count (holds db)) " total :governor-hold facts, "
+                  (count commits) " commits, "
+                  (count runs) " graph runs, "
+                  (count (store/shipment-log db)) " shipment-log records, "
+                  (count (store/schedule-log db)) " schedule proposals, "
+                  (count (store/carrier-log db)) " carrier coordinations, "
+                  (count (store/concern-log db)) " concern flags)"))))
