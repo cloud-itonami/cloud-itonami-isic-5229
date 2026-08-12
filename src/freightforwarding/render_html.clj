@@ -805,8 +805,8 @@
                (row "audit-ledger facts total" (n-cell (count ledger)))
                (row "confidence floor (<code>governor/confidence-floor</code>)"
                     (n-cell governor/confidence-floor))
-               (row "jurisdictions with an official spec-basis on file"
-                    (n-cell (str (:count cov) " &mdash; " (str/join ", " (:jurisdictions cov)))))])
+               (row "jurisdictions with an official spec-basis on file" (n-cell (:count cov)))
+               (row "&hellip; which jurisdictions" (kw-codes (:jurisdictions cov)))])
 
      (section "Shipment directory (SSoT)"
               "The shipment/consignment register after the run. <code>:registered?</code> and
