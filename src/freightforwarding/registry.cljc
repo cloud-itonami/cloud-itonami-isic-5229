@@ -20,7 +20,7 @@
   clearance decision or a shipment-release authorization. That
   authority stays outside this actor entirely (see
   `freightforwarding.governor`'s `finalize-clearance-violations`)."
-  (:require [clojure.string :as str]))
+  (:require [kotoba.lang.text :as str]))
 
 (defn- unsigned-certificate
   "Every certificate this actor produces is UNSIGNED -- signature is
@@ -50,7 +50,7 @@
   (require-field! label "jurisdiction" jurisdiction)
   (when (< sequence 0)
     (throw (ex-info (str label ": sequence must be >= 0") {})))
-  (let [record-number (str (str/upper-case jurisdiction) "-" prefix "-" (zero-pad sequence 6))
+  (let [record-number (str (str/upper jurisdiction) "-" prefix "-" (zero-pad sequence 6))
         record {"record_id" record-number
                 "kind" (str label "-draft")
                 "target_id" target-id
