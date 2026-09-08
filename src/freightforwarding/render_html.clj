@@ -99,7 +99,7 @@
 
   Usage: `clojure -M:dev:render-html [out-file]`
   (default `docs/samples/operator-console.html`)."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [jp-go-dds.skin]
             [langgraph.graph :as g]
             [freightforwarding.advisor :as advisor]
@@ -392,7 +392,7 @@
   #{"approved-by" "approved_by" "approver" "approved-by-id" "approved_by_id" "by"})
 
 (defn- approver?
-  [k] (contains? approver-key-names (str/lower-case k)))
+  [k] (contains? approver-key-names (str/lower k)))
 
 (defn- approver-attribution
   "DERIVED honest disclosure about where the human approver's id

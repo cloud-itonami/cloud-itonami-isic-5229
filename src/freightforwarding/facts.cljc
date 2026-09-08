@@ -40,7 +40,7 @@
 
   Coverage is reported HONESTLY (see `coverage`) -- five jurisdictions
   is a starting catalog, not the world."
-  (:require [clojure.string :as str]))
+  (:require [kotoba.lang.text :as str]))
 
 (def catalog
   "iso3 -> requirement map.

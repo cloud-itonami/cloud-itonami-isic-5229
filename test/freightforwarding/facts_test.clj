@@ -4,7 +4,7 @@
   jurisdiction must yield NOTHING, every entry must carry a real
   citation, and coverage must be reported honestly rather than implied."
   (:require [clojure.test :refer [deftest testing is]]
-            [clojure.string :as str]
+            [kotoba.lang.text :as str]
             [freightforwarding.facts :as facts]))
 
 (deftest unknown-jurisdiction-yields-nothing
