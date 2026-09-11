@@ -26,7 +26,7 @@
   as what this proposal does NOT do, using verbs the governor's own
   scope-exclusion patterns do not scan for, so a legitimate default
   proposal never matches its own governor's finalization-action
-  patterns. `test/freightforwarding/scope_exclusion_test.clj` asserts
+  patterns. `test/freightforwarding/scope_exclusion_test.cljk` asserts
   this directly for every op below.
 
   Proposal shape (all ops):
