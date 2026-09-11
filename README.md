@@ -64,8 +64,8 @@ approval and audit evidence.
 ## Run
 
 ```bash
-clojure -M:dev:test    # 55 tests / 317 assertions
-clojure -M:dev:run     # the actor demo — walks the happy path and every refusal
+kbb -M:dev:test    # 55 tests / 317 assertions
+kbb -M:dev:run     # the actor demo — walks the happy path and every refusal
 ```
 
 ## What the governor refuses

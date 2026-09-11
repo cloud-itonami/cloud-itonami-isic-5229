@@ -1,5 +1,5 @@
 (ns freightforwarding.sim
-  "Demo driver -- `clojure -M:dev:run`. Walks a clean shipment through
+  "Demo driver -- `kbb -M:dev:run`. Walks a clean shipment through
   shipment-record logging (auto-commits at phase 3) -> routing/
   consolidation scheduling (escalates/approve/commit) -> a compliance-
   concern flag (ALWAYS escalates/approve/commit) -> carrier-booking
