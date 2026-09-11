@@ -6,7 +6,7 @@
   actor stack -- `freightforwarding.operation` (a compiled langgraph
   StateGraph) -> `freightforwarding.governor` -> `freightforwarding.store`
   -- through a scenario extended from this repo's own
-  `freightforwarding.sim` demo driver (`clojure -M:dev:run`), then
+  `freightforwarding.sim` demo driver (`kbb -M:dev:run`), then
   renders the resulting store, audit ledger and the four append-only
   coordination-record registers.
 
@@ -97,7 +97,7 @@
   generated id, so two consecutive runs are byte-identical (verified
   with `cmp`).
 
-  Usage: `clojure -M:dev:render-html [out-file]`
+  Usage: `kbb -M:dev:render-html [out-file]`
   (default `docs/samples/operator-console.html`)."
   (:require [kotoba.lang.text :as str]
             [jp-go-dds.skin]
@@ -778,7 +778,7 @@
      "<span class=\"badge\">coordination-only &middot; every effect is :propose</span> "
      "<span class=\"badge\">never a customs-clearance or shipment-release authority</span></p>\n"
      "<p class=\"subtitle\">Generated at build time by <code>freightforwarding.render-html</code> "
-     "(<code>clojure -M:dev:render-html</code>) by actually running the compiled "
+     "(<code>kbb -M:dev:render-html</code>) by actually running the compiled "
      "<code>freightforwarding.operation</code> StateGraph over a freshly seeded store. "
      "Every value below was read back out of that run &mdash; there is no mock markup on this page, "
      "and no timestamp, so successive regenerations are byte-identical.</p>\n"
@@ -950,7 +950,7 @@
      "  this actor's closed allowlist to begin with. Every proposal carries <code>:effect :propose</code>;\n"
      "  committing one means a coordination artifact was logged, never that goods were cleared or\n"
      "  released.</p>\n"
-     "  <p>Regenerate: <code>clojure -M:dev:render-html</code></p>\n"
+     "  <p>Regenerate: <code>kbb -M:dev:render-html</code></p>\n"
      "</footer>\n"
      "</body></html>\n")))
 

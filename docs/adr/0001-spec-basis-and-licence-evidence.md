@@ -68,7 +68,7 @@ SSoT is configured.
 
 ## Verification
 
-- **55 tests / 317 assertions, 0 failures** (`clojure -M:dev:test`), up from
+- **55 tests / 317 assertions, 0 failures** (`kbb -M:dev:test`), up from
   37/210. The pre-existing 37 still pass unchanged except for the demo-set
   membership assertions, which now include the two new fixtures.
 - **Mutation-tested.** Six independent breaks each turn the suite red, green on
