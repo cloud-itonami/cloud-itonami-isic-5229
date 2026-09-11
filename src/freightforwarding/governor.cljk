@@ -83,7 +83,7 @@
   actor's own happy path. Every pattern below is phrased as the
   FINALIZATION/EXECUTION ACTION ('finalize the customs clearance',
   'authorize the shipment release'), never the bare noun --
-  `test/freightforwarding/scope_exclusion_test.clj` asserts directly
+  `test/freightforwarding/scope_exclusion_test.cljk` asserts directly
   that every one of `freightforwarding.advisor`'s four default
   proposals passes this check cleanly.
 
