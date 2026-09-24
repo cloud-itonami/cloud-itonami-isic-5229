@@ -3,7 +3,7 @@
   regress on: `:flag-compliance-concern` must NEVER be a member of
   any phase's `:auto` set."
   (:require [kotoba.test :refer [deftest is testing]]
-            [clojure.set :as set]
+            [kotoba.lang.coll :as set]
             [freightforwarding.phase :as phase]))
 
 (deftest flag-compliance-concern-never-auto-at-any-phase
