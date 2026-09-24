@@ -9,7 +9,7 @@
   refusal that never fires is indistinguishable from no refusal at all,
   every case below is paired: the unknown jurisdiction holds, the known
   one does not."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [langgraph.graph :as g]
             [freightforwarding.store :as store]
             [freightforwarding.governor :as governor]

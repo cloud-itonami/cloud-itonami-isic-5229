@@ -9,7 +9,7 @@
     that tries to finalize a customs-clearance or shipment-release
     decision ever commits (or even reaches a human), and every
     decision (commit OR hold) leaves exactly one ledger fact."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [langgraph.graph :as g]
             [freightforwarding.store :as store]
             [freightforwarding.governor :as governor]
