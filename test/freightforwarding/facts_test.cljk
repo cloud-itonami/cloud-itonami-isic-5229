@@ -3,7 +3,7 @@
   truth (check 5), so its invariants are pinned here: an unknown
   jurisdiction must yield NOTHING, every entry must carry a real
   citation, and coverage must be reported honestly rather than implied."
-  (:require [clojure.test :refer [deftest testing is]]
+  (:require [kotoba.test :refer [deftest testing is]]
             [kotoba.lang.text :as str]
             [freightforwarding.facts :as facts]))
 
