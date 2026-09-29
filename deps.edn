@@ -49,7 +49,7 @@
         io.github.kotoba-lang/langchain-store
         {:local/root "../../kotoba-lang/langchain-store"}
         ;; デジタル庁デザインシステム (DADS) -- the workspace-wide base
-        ;; design system (superproject CLAUDE.md, 2026-08-05). Consumed as
+        ;; design system (superproject AGENTS.md, 2026-08-05). Consumed as
         ;; a git dep (never :local/root -- that breaks for a standalone
         ;; fork resolving out of the git cache). Used ONLY by
         ;; `freightforwarding.render-html`, the build-time generator for
